@@ -230,7 +230,11 @@ Tip: enable `--cycle` to sweep the hue across the RGB spectrum in real time.
 
 ## 📄 License
 
-This sample is provided **as‑is**. Use, modify, and redistribute at your discretion. If you need an explicit license, drop in an `MIT` or `Unlicense` file.
+Mico's Matrix Rain C code is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+Mico's Matrix Rain C code is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with  Mico's Matrix Rain C code. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
