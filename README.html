@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+	"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+
+<head>
+<title>README.html</title>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8"/>
+
+</head>
+
+<body>
+
+<h1 id="matrix-rain-bloom">Matrix Rain (Bloom)</h1>
+<p>A tiny SDL2 + OpenGL screensaver/toy that renders <strong>Matrix‑style falling glyphs</strong> with a <strong>neon bloom</strong> pass. CPU stays light; the GPU handles glow and blur. Works on Linux and macOS.</p>
+<hr />
+<h2 id="features">✨ Features</h2>
+<ul>
+<li>Additive bloom via render‑to‑texture + separable blur (ping‑pong FBOs)</li>
+<li>Color <strong>palettes</strong> (<code>-C</code>) + live <strong>hue cycling</strong> (<code>--cycle</code>)</li>
+<li>Runs as a regular window, fullscreen, or <strong>X11 desktop wallpaper</strong> (<code>--desktop</code>)</li>
+<li>Glyph atlas from <strong>SDL_ttf</strong> (use your own font with <code>-F</code>)</li>
+<li>Low CPU: grid updates on CPU, everything else on GPU</li>
+</ul>
+<hr />
+<h2 id="quick-start">🚀 Quick Start</h2>
+<h3 id="linux">Linux</h3>
+<div class="sourceCode" id="cb1"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true"></a><span class="fu">sudo</span> apt install libsdl2-dev libsdl2-ttf-dev</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true"></a><span class="co"># Regular build</span></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true"></a><span class="fu">gcc</span> -std=c11 -O2 -Wall -Wextra matrix_rain_bloom.c -o matrix_rain_bloom <span class="kw">\</span></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true"></a>  <span class="kw">`</span><span class="ex">sdl2-config</span> --cflags --libs<span class="kw">`</span> <span class="ex">-lSDL2_ttf</span> -lGL -lm</span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true"></a></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true"></a><span class="co"># With X11 desktop wallpaper support (enables --desktop)</span></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true"></a><span class="fu">gcc</span> -std=c11 -O2 -Wall -Wextra -DENABLE_X11_DESKTOP matrix_rain_bloom.c -o matrix_rain_bloom <span class="kw">\</span></span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true"></a>  <span class="kw">`</span><span class="ex">sdl2-config</span> --cflags --libs<span class="kw">`</span> <span class="ex">-lSDL2_ttf</span> -lGL -lm -lX11</span></code></pre></div>
+<h3 id="macos-homebrew">macOS (Homebrew)</h3>
+<div class="sourceCode" id="cb2"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true"></a><span class="ex">brew</span> install sdl2 sdl2_ttf</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true"></a><span class="fu">clang</span> -std=c11 -O2 -Wall -Wextra <span class="kw">\</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true"></a>  <span class="ex">-I/opt/homebrew/include/SDL2</span> -L/opt/homebrew/lib <span class="kw">\</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true"></a>  <span class="ex">matrix_rain_bloom.c</span> -o matrix_rain_bloom <span class="kw">\</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true"></a>  <span class="ex">-lSDL2</span> -lSDL2_ttf -framework OpenGL -lm</span></code></pre></div>
+<h3 id="makefile-optional">Makefile (optional)</h3>
+<p>Create <code>Makefile</code> next to the source:</p>
+<pre class="make"><code>CC      = gcc
+CFLAGS  = -std=c11 -O2 -Wall -Wextra $(shell sdl2-config --cflags)
+LDLIBS  = $(shell sdl2-config --libs) -lSDL2_ttf -lGL -lm
+SRC     = matrix_rain_bloom.c
+BIN     = matrix_rain_bloom
+
+# Enable X11 desktop wallpaper mode with: make DESKTOP=1
+ifeq ($(DESKTOP),1)
+  CFLAGS += -DENABLE_X11_DESKTOP
+  LDLIBS += -lX11
+endif
+
+$(BIN): $(SRC)
+    $(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
+
+.PHONY: clean run
+clean:
+    rm -f $(BIN)
+
+run: $(BIN)
+    ./$(BIN) -f 60 -d 70 -s 18 -P 22 -C blue</code></pre>
+<hr />
+<h2 id="running">▶️ Running</h2>
+<p><strong>Basic:</strong></p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true"></a><span class="ex">./matrix_rain_bloom</span></span></code></pre></div>
+<p><strong>Blue palette, 60 FPS, medium density:</strong></p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true"></a><span class="ex">./matrix_rain_bloom</span> -f 60 -d 70 -s 18 -P 22 -C blue</span></code></pre></div>
+<p><strong>Neon look:</strong></p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true"></a><span class="ex">./matrix_rain_bloom</span> --bloom-scale 0.4 --bloom-radius 5 --bloom-intensity 1.8</span></code></pre></div>
+<p><strong>Hue sweep over time:</strong></p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true"></a><span class="ex">./matrix_rain_bloom</span> --cycle --cycle-speed 25</span></code></pre></div>
+<p><strong>Wallpaper‑style window on X11:</strong></p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true"></a><span class="co"># build with -DENABLE_X11_DESKTOP and -lX11 first</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true"></a><span class="ex">./matrix_rain_bloom</span> --desktop -C matrix</span></code></pre></div>
+<hr />
+<h2 id="cli-options">⚙️ CLI Options</h2>
+<table>
+<colgroup>
+<col style="width: 19%" />
+<col style="width: 80%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Option</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>-f &lt;fps&gt;</code></td>
+<td>Target FPS (default 60).</td>
+</tr>
+<tr class="even">
+<td><code>-d &lt;0..100&gt;</code></td>
+<td>Stream density percentage (default 65).</td>
+</tr>
+<tr class="odd">
+<td><code>-s &lt;cell_px&gt;</code></td>
+<td>Cell size in pixels (default 18).</td>
+</tr>
+<tr class="even">
+<td><code>-m</code></td>
+<td>Monochrome mode.</td>
+</tr>
+<tr class="odd">
+<td><code>-F &lt;fontpath&gt;</code></td>
+<td>Path to TTF/OTF font for glyph atlas.</td>
+</tr>
+<tr class="even">
+<td><code>-P &lt;pt&gt;</code></td>
+<td>Font point size for atlas (default 22).</td>
+</tr>
+<tr class="odd">
+<td><code>-C &lt;palette&gt;</code></td>
+<td>Color palette: <code>blue</code> (default), <code>green</code>, <code>purple</code>, <code>cyan</code>, <code>magenta</code>, <code>red</code>, <code>matrix</code>.</td>
+</tr>
+<tr class="even">
+<td><code>--cycle</code></td>
+<td>Enable hue cycling.</td>
+</tr>
+<tr class="odd">
+<td><code>--cycle-speed &lt;deg/s&gt;</code></td>
+<td>Hue change speed (default 30).</td>
+</tr>
+<tr class="even">
+<td><code>--no-bloom</code></td>
+<td>Disable bloom (if you just want crisp glyphs).</td>
+</tr>
+<tr class="odd">
+<td><code>--bloom-scale &lt;0.25..1.0&gt;</code></td>
+<td>Downscale factor for bloom buffer (default 0.5). Lower → softer/wider glow.</td>
+</tr>
+<tr class="even">
+<td><code>--bloom-radius &lt;1..5&gt;</code></td>
+<td>Blur radius (default 4).</td>
+</tr>
+<tr class="odd">
+<td><code>--bloom-intensity &lt;0..3&gt;</code></td>
+<td>Bloom strength (default 1.0).</td>
+</tr>
+<tr class="even">
+<td><code>--desktop</code></td>
+<td>X11: attempt “desktop” window (below, sticky, skip taskbar/pager). Requires <code>-DENABLE_X11_DESKTOP</code> &amp; <code>-lX11</code>.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="keyboard-controls">⌨️ Keyboard Controls</h2>
+<pre><code>q             quit
+p             pause
++ / -         FPS up / down
+[ / ]         density down / up
+m             toggle monochrome
+F11           toggle fullscreen
+
+c             toggle hue cycling
+, / .         cycle speed down / up
+n / b         next / previous palette
+1..7          quick palettes (1:blue 2:green 3:purple 4:cyan 5:magenta 6:red 7:matrix)
+
+v             toggle bloom on/off
+g / f         bloom intensity up / down
+r / e         blur radius up / down</code></pre>
+<hr />
+<h2 id="palettes">🎨 Palettes</h2>
+<ul>
+<li><code>blue</code> (default)</li>
+<li><code>green</code></li>
+<li><code>purple</code></li>
+<li><code>cyan</code></li>
+<li><code>magenta</code></li>
+<li><code>red</code></li>
+<li><code>matrix</code> (classic green)</li>
+</ul>
+<p>Tip: enable <code>--cycle</code> to sweep the hue across the RGB spectrum in real time.</p>
+<hr />
+<h2 id="fonts-glyphs">🔎 Fonts &amp; Glyphs</h2>
+<ul>
+<li>The program builds a texture atlas via <strong>SDL_ttf</strong>.</li>
+<li>It tries common monospace fonts automatically (DejaVu Sans Mono, Liberation Mono, Menlo, SF Mono). Use <code>-F</code> to force a specific font.</li>
+<li>Adjust <code>-P</code> (point size) to sharpen glyphs for your screen scale.</li>
+<li>The character pool is defined in the source at <code>GLYPH_POOL</code>. You can edit it to add symbols or Kana.</li>
+</ul>
+<hr />
+<h2 id="desktop-wallpaper-mode-x11">🖥️ Desktop Wallpaper Mode (X11)</h2>
+<ul>
+<li>Build with <code>-DENABLE_X11_DESKTOP</code> and link <code>-lX11</code>.</li>
+<li>Run with <code>--desktop</code> to hint your window manager to treat the window as a desktop layer (below, sticky, and hidden from taskbar/pager).</li>
+<li>Behavior depends on your WM/DE. Some may need additional configuration; others may not support true desktop windows.</li>
+</ul>
+<hr />
+<h2 id="recipes">🧪 Recipes</h2>
+<p><strong>Cinematic glow:</strong></p>
+<div class="sourceCode" id="cb10"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true"></a><span class="ex">./matrix_rain_bloom</span> --bloom-scale 0.33 --bloom-radius 5 --bloom-intensity 2.2 -C cyan</span></code></pre></div>
+<p><strong>Subtle glow (low power):</strong></p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true"></a><span class="ex">./matrix_rain_bloom</span> --bloom-scale 0.7 --bloom-radius 3 --bloom-intensity 0.8</span></code></pre></div>
+<p><strong>4K dense wall of code:</strong></p>
+<div class="sourceCode" id="cb12"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true"></a><span class="ex">./matrix_rain_bloom</span> -s 14 -d 80 -f 72 --bloom-scale 0.5 --bloom-radius 5 --bloom-intensity 1.6</span></code></pre></div>
+<hr />
+<h2 id="troubleshooting">🛠️ Troubleshooting</h2>
+<ul>
+<li><p><strong><code>fatal error: SDL_ttf.h: No such file or directory</code></strong> Install the dev package: <code>sudo apt install libsdl2-ttf-dev</code> (Linux) or <code>brew install sdl2_ttf</code> (macOS).</p></li>
+<li><p><strong><code>undefined reference to fmodf</code> / <code>DSO missing from command line</code></strong> Link libm <strong>at the end</strong>: add <code>-lm</code> after your objects/libs.</p></li>
+<li><p><strong><code>undefined reference to XFlush</code></strong> (or similar) Only if you compiled with <code>--desktop</code> bits: link <code>-lX11</code> and pass <code>-DENABLE_X11_DESKTOP</code>. Otherwise, run without <code>--desktop</code>.</p></li>
+<li><p><strong>Framebuffer Object functions implicitly declared</strong> Your GL headers are older. Compile with <code>-DGL_GLEXT_PROTOTYPES</code> or ensure <code>&lt;GL/glext.h&gt;</code> is included (the source already does this on non‑Apple).</p></li>
+<li><p><strong>Black window / no glyphs</strong> The fallback fonts weren’t found. Run with a known font: <code>-F /path/to/YourMono.ttf</code>.</p></li>
+</ul>
+<hr />
+<h2 id="performance-tips">⚡ Performance Tips</h2>
+<ul>
+<li>Keep VSync on (<code>SDL_GL_SetSwapInterval(1)</code>) to avoid runaway FPS.</li>
+<li>Lower <code>--bloom-scale</code> for wider glow at similar cost; adjust <code>--bloom-intensity</code> to taste.</li>
+<li><code>-s</code> controls grid density indirectly; smaller cells → more glyphs. Combine with <code>-f</code> carefully.</li>
+<li>On integrated GPUs, prefer <code>--bloom-radius 3..4</code> and <code>--bloom-scale 0.5..0.7</code>.</li>
+</ul>
+<hr />
+<h2 id="license">📄 License</h2>
+<p>This sample is provided <strong>as‑is</strong>. Use, modify, and redistribute at your discretion. If you need an explicit license, drop in an <code>MIT</code> or <code>Unlicense</code> file.</p>
+<hr />
+<h2 id="credits">🙌 Credits</h2>
+<ul>
+<li>SDL2 &amp; SDL_ttf</li>
+<li>OpenGL (compat profile)</li>
+<li>You, for making it glow ✨</li>
+</ul>
+
+</body>
+</html>
