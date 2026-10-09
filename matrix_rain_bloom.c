@@ -37,6 +37,11 @@
 //   clang -std=c11 -O2 -Wall -Wextra -I/opt/homebrew/include/SDL2 -L/opt/homebrew/lib 
 //     matrix_rain_bloom.c -o matrix_rain_bloom -lSDL2 -lSDL2_ttf -framework OpenGL -lm
 //
+// Timing
+//   -f sets the rain speed in simulation steps per second (default 60).
+//   Rendering is paced by vsync / the display refresh rate, independently.
+//   -s and -P are in logical points; they are scaled on HiDPI displays.
+//
 // Run examples
 //   ./matrix_rain_bloom -f 60 -d 70 -s 18 -P 22 -C blue
 //   ./matrix_rain_bloom --cycle --cycle-speed 25 --bloom-intensity 1.2
@@ -83,7 +88,10 @@
 #define MIN_SPEED        1
 #define MAX_SPEED        4
 #define START_PROB_PCT   6
-#define DEFAULT_FPS      60
+#define DEFAULT_SIM_HZ   60   // simulation steps per second (rain speed)
+#define MIN_SIM_HZ       6
+#define MAX_SIM_HZ       240
+#define MAX_CATCHUP      8    // max sim steps per rendered frame
 #define DEFAULT_DENSITY  65
 #define DEFAULT_CELL_PX  18
 #define DEFAULT_PT_SIZE  22
@@ -105,7 +113,9 @@ static const char *GLYPH_POOL = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijk
 static unsigned char *grid_age = NULL; // rows*cols
 static unsigned int  *grid_ch  = NULL; // UTF-32 (we use ASCII mostly)
 static int G_ROWS = 0, G_COLS = 0;
-static int cell_px = DEFAULT_CELL_PX;
+static int   cell_pt     = DEFAULT_CELL_PX; // logical size (user, -s)
+static int   cell_px     = DEFAULT_CELL_PX; // physical size = cell_pt * dpi
+static float g_dpi_scale = 0.0f;            // drawable px per window pt
 
 typedef struct {
   bool active;
@@ -287,11 +297,6 @@ static int next_p2(int x) {
 }
 
 static int load_font_build_atlas(const char *font_path, int pt_size) {
-  if (TTF_Init() != 0) {
-    fprintf(stderr, "TTF_Init: %s", TTF_GetError());
-    return -1;
-  }
-
   TTF_Font *font = NULL;
   if (font_path) font = TTF_OpenFont(font_path, pt_size);
 
@@ -309,11 +314,11 @@ static int load_font_build_atlas(const char *font_path, int pt_size) {
       if (font) { fprintf(stderr, "Using font: %s\n", cands[i]); break; }
     }
   } else {
-    fprintf(stderr, "Using font: %s", font_path);
+    fprintf(stderr, "Using font: %s\n", font_path);
   }
 
   if (!font) {
-    fprintf(stderr, "TTF_OpenFont failed.");
+    fprintf(stderr, "TTF_OpenFont failed: no usable font (try -F /path/to/font.ttf)\n");
     return -1;
   }
 
@@ -342,12 +347,13 @@ static int load_font_build_atlas(const char *font_path, int pt_size) {
   SDL_Surface *atlas = SDL_CreateRGBSurfaceWithFormat(
       0, atlas_w, atlas_h, 32, SDL_PIXELFORMAT_ABGR8888);
   if (!atlas) {
-    fprintf(stderr, "CreateRGBSurface: %s", SDL_GetError());
+    fprintf(stderr, "CreateRGBSurface: %s\n", SDL_GetError());
     TTF_CloseFont(font);
     return -1;
   }
   SDL_FillRect(atlas, NULL, SDL_MapRGBA(atlas->format, 0, 0, 0, 0));
 
+  memset(glyphs, 0, sizeof glyphs);
   int gi = 0;
   for (int c = first; c <= last; ++c) {
     char       text[2]  = { (char)c, 0 };
@@ -411,7 +417,7 @@ static void destroy_rt(RenderTarget *rt) {
   rt->w = rt->h = 0;
 }
 
-static void create_rt(RenderTarget *rt, int w, int h) {
+static bool create_rt(RenderTarget *rt, int w, int h) {
   destroy_rt(rt);
   rt->w = w; rt->h = h;
 
@@ -430,10 +436,13 @@ static void create_rt(RenderTarget *rt, int w, int h) {
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                          GL_TEXTURE_2D, rt->tex, 0);
   GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-  if (status != GL_FRAMEBUFFER_COMPLETE) {
-    fprintf(stderr, "FBO incomplete (%d)", (int)status);
-  }
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  if (status != GL_FRAMEBUFFER_COMPLETE) {
+    fprintf(stderr, "FBO incomplete (0x%x)\n", (unsigned)status);
+    destroy_rt(rt);
+    return false;
+  }
+  return true;
 }
 
 static void ensure_bloom_rts(int win_w, int win_h) {
@@ -441,8 +450,16 @@ static void ensure_bloom_rts(int win_w, int win_h) {
   int rh = (int)(win_h * BLOOM_SCALE);
   if (rw < 8) rw = 8;
   if (rh < 8) rh = 8;
-  if (rtA.w != rw || rtA.h != rh) create_rt(&rtA, rw, rh);
-  if (rtB.w != rw || rtB.h != rh) create_rt(&rtB, rw, rh);
+  if (!BLOOM_ON) return;
+  bool ok = true;
+  if (rtA.w != rw || rtA.h != rh) ok = create_rt(&rtA, rw, rh) && ok;
+  if (rtB.w != rw || rtB.h != rh) ok = create_rt(&rtB, rw, rh) && ok;
+  if (!ok) {
+    fprintf(stderr, "Bloom disabled: could not create framebuffers.\n");
+    destroy_rt(&rtA);
+    destroy_rt(&rtB);
+    BLOOM_ON = false;
+  }
 }
 
 // ===== Drawing =====
@@ -560,8 +577,11 @@ static void blur_pass(RenderTarget *dst, RenderTarget *src,
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+static void draw_frame_no_bloom(int win_w, int win_h, bool mono);
+
 static void draw_frame_with_bloom(int win_w, int win_h, bool mono) {
   ensure_bloom_rts(win_w, win_h);
+  if (!BLOOM_ON) { draw_frame_no_bloom(win_w, win_h, mono); return; }
 
   // 1) Draw bright layer into rtA (downscaled)
   glBindFramebuffer(GL_FRAMEBUFFER, rtA.fbo);
@@ -615,11 +635,12 @@ static void compute_grid_from_window(int w, int h) {
 
 static void usage(const char *prog) {
   fprintf(stderr,
-    "Usage: %s [-f fps] [-d density0-100] [-s cell_px] [-m] [-F fontpath] [-P pt] "
-    "[-C palette] [--cycle] [--cycle-speed degps] [--desktop] [--no-bloom] "
-    "[--bloom-scale s] [--bloom-radius r] [--bloom-intensity k]"
-    "Palettes: blue, green, purple, cyan, magenta, red, matrix",
-    prog);
+    "Usage: %s [-f steps/s] [-d density0-100] [-s cell_pt] [-m] [-F fontpath] [-P pt]\n"
+    "       [-C palette] [--cycle] [--cycle-speed degps] [--desktop] [--no-bloom]\n"
+    "       [--bloom-scale s] [--bloom-radius r] [--bloom-intensity k]\n"
+    "  -f  rain speed in simulation steps/s (%d..%d, default %d)\n"
+    "Palettes: blue, green, purple, cyan, magenta, red, matrix\n",
+    prog, MIN_SIM_HZ, MAX_SIM_HZ, DEFAULT_SIM_HZ);
 }
 
 #if defined(ENABLE_X11_DESKTOP) && \
@@ -668,26 +689,82 @@ static PaletteId parse_palette(const char *s) {
   return PAL_BLUE;
 }
 
+// ===== Layout & timing =====
+static const char *g_font_path = NULL;
+static int         g_font_pt   = DEFAULT_PT_SIZE;
+
+// Recompute DPI scale, cell size, glyph atlas, grid and bloom targets whenever
+// the drawable size or the window's pixel density changes. Polled every frame,
+// so it also covers fullscreen toggles and moves between displays.
+static bool update_layout(SDL_Window *win, int *last_dw, int *last_dh) {
+  int ww, wh, dw, dh;
+  SDL_GetWindowSize(win, &ww, &wh);
+  SDL_GL_GetDrawableSize(win, &dw, &dh);
+  if (dw <= 0 || dh <= 0) return true;  // minimized
+
+  float scale = (ww > 0) ? (float)dw / (float)ww : 1.0f;
+  if (scale < 1.0f) scale = 1.0f;
+  bool scale_changed = fabsf(scale - g_dpi_scale) > 0.01f;
+
+  if (!scale_changed && dw == *last_dw && dh == *last_dh) return true;
+
+  if (scale_changed || atlas_tex == 0) {
+    g_dpi_scale = scale;
+    int pt = (int)lroundf((float)g_font_pt * scale);
+    if (load_font_build_atlas(g_font_path, pt) != 0) return false;
+  }
+
+  cell_px = (int)lroundf((float)cell_pt * g_dpi_scale);
+  if (cell_px < 4) cell_px = 4;
+  compute_grid_from_window(dw, dh);
+  ensure_bloom_rts(dw, dh);
+
+  *last_dw = dw;
+  *last_dh = dh;
+  return true;
+}
+
+// Seconds per refresh of the display the window is on (fallback 60 Hz).
+static double display_period(SDL_Window *win) {
+  SDL_DisplayMode m;
+  int idx = SDL_GetWindowDisplayIndex(win);
+  if (idx >= 0 && SDL_GetCurrentDisplayMode(idx, &m) == 0 && m.refresh_rate > 0)
+    return 1.0 / (double)m.refresh_rate;
+  return 1.0 / 60.0;
+}
+
+static inline double now_s(void) {
+  return (double)SDL_GetPerformanceCounter() /
+         (double)SDL_GetPerformanceFrequency();
+}
+
+static void set_palette(PaletteId p) {
+  g_palette = p;
+  if (!g_cycle) g_hue = palette_base_hue(g_palette);
+}
+
 int main(int argc, char **argv) {
-  int  fps = DEFAULT_FPS, density = DEFAULT_DENSITY;
+  int  sim_hz = DEFAULT_SIM_HZ, density = DEFAULT_DENSITY;
   bool mono = false, want_desktop = false;
 
-  const char *fontpath = NULL; int pt_size = DEFAULT_PT_SIZE;
-
   for (int i = 1; i < argc; ++i) {
-    if      (strcmp(argv[i], "-f") == 0 && i + 1 < argc) fps = atoi(argv[++i]);
+    if      (strcmp(argv[i], "-f") == 0 && i + 1 < argc) sim_hz = atoi(argv[++i]);
     else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
       density = atoi(argv[++i]);
       density = density < 0 ? 0 : (density > 100 ? 100 : density);
     }
     else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
-      cell_px = atoi(argv[++i]);
-      if (cell_px < 8)  cell_px = 8;
-      if (cell_px > 64) cell_px = 64;
+      cell_pt = atoi(argv[++i]);
+      if (cell_pt < 8)  cell_pt = 8;
+      if (cell_pt > 64) cell_pt = 64;
     }
     else if (strcmp(argv[i], "-m") == 0) mono = true;
-    else if (strcmp(argv[i], "-F") == 0 && i + 1 < argc) fontpath = argv[++i];
-    else if (strcmp(argv[i], "-P") == 0 && i + 1 < argc) pt_size  = atoi(argv[++i]);
+    else if (strcmp(argv[i], "-F") == 0 && i + 1 < argc) g_font_path = argv[++i];
+    else if (strcmp(argv[i], "-P") == 0 && i + 1 < argc) {
+      g_font_pt = atoi(argv[++i]);
+      if (g_font_pt < 6)   g_font_pt = 6;
+      if (g_font_pt > 128) g_font_pt = 128;
+    }
     else if (strcmp(argv[i], "-C") == 0 && i + 1 < argc) {
       g_palette = parse_palette(argv[++i]);
       g_hue     = palette_base_hue(g_palette);
@@ -715,12 +792,22 @@ int main(int argc, char **argv) {
       if (BLOOM_INTENSITY < 0.0f) BLOOM_INTENSITY = 0.0f;
       if (BLOOM_INTENSITY > 3.0f) BLOOM_INTENSITY = 3.0f;
     }
-    else if (strcmp(argv[i], "-h") == 0) { usage(argv[0]); return 0; }
+    else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+      usage(argv[0]);
+      return 0;
+    }
   }
+  if (sim_hz < MIN_SIM_HZ) sim_hz = MIN_SIM_HZ;
+  if (sim_hz > MAX_SIM_HZ) sim_hz = MAX_SIM_HZ;
 
   srand((unsigned)time(NULL));
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_TIMER) != 0) {
-    fprintf(stderr, "SDL_Init: %s", SDL_GetError());
+    fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
+    return 1;
+  }
+  if (TTF_Init() != 0) {
+    fprintf(stderr, "TTF_Init: %s\n", TTF_GetError());
+    SDL_Quit();
     return 1;
   }
 
@@ -732,28 +819,29 @@ int main(int argc, char **argv) {
   SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE,  8);
   SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
 
-  int         win_w = 1280, win_h = 720;
-  SDL_Window *win = SDL_CreateWindow(
+  int           rc  = 1;
+  SDL_Window   *win = NULL;
+  SDL_GLContext ctx = NULL;
+
+  win = SDL_CreateWindow(
       "Matrix Rain (Bloom)",
       SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-      win_w, win_h,
+      1280, 720,
       SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-
   if (!win) {
-    fprintf(stderr, "SDL_CreateWindow: %s", SDL_GetError());
-    SDL_Quit();
-    return 1;
+    fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
+    goto cleanup;
   }
 
-  SDL_GLContext ctx = SDL_GL_CreateContext(win);
+  ctx = SDL_GL_CreateContext(win);
   if (!ctx) {
-    fprintf(stderr, "SDL_GL_CreateContext: %s", SDL_GetError());
-    SDL_DestroyWindow(win);
-    SDL_Quit();
-    return 1;
+    fprintf(stderr, "SDL_GL_CreateContext: %s\n", SDL_GetError());
+    goto cleanup;
   }
 
-  SDL_GL_SetSwapInterval(1);
+  // Prefer adaptive vsync, fall back to regular vsync. Either way the frame
+  // limiter below caps rendering at the refresh rate if vsync is ignored.
+  if (SDL_GL_SetSwapInterval(-1) != 0) SDL_GL_SetSwapInterval(1);
 
 #if defined(ENABLE_X11_DESKTOP) && \
     (defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
@@ -763,64 +851,60 @@ int main(int argc, char **argv) {
   if (want_desktop) {
     fprintf(stderr,
             "--desktop requested but X11 desktop support not compiled. "
-            "Rebuild with -DENABLE_X11_DESKTOP and link -lX11.");
+            "Rebuild with: make DESKTOP=1\n");
   }
 #endif
 
-  if (load_font_build_atlas(fontpath, pt_size) != 0) {
-    fprintf(stderr, "Warning: atlas build failed.");
+  int last_dw = 0, last_dh = 0;
+  if (!update_layout(win, &last_dw, &last_dh)) {
+    fprintf(stderr, "Font atlas build failed; exiting.\n");
+    goto cleanup;
   }
 
-  int drawable_w, drawable_h;
-  SDL_GL_GetDrawableSize(win, &drawable_w, &drawable_h);
-  compute_grid_from_window(drawable_w, drawable_h);
-  ensure_bloom_rts(drawable_w, drawable_h);
-
   bool   running = true, paused = false, fullscreen = false;
-  int    frame_ms = (fps > 0 ? (1000 / fps) : (1000 / DEFAULT_FPS));
-  Uint32 prev_ms  = SDL_GetTicks();
+  double sim_dt  = 1.0 / sim_hz;
+  double acc     = 0.0;
+  double prev_t  = now_s();
 
   while (running) {
-    // Events
+    double frame_start = now_s();
+
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
       if (e.type == SDL_QUIT) {
         running = false;
-      } else if (e.type == SDL_WINDOWEVENT &&
-                 (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
-                  e.window.event == SDL_WINDOWEVENT_RESIZED)) {
-        int w, h; SDL_GL_GetDrawableSize(win, &w, &h);
-        compute_grid_from_window(w, h);
-        ensure_bloom_rts(w, h);
       } else if (e.type == SDL_KEYDOWN) {
         SDL_Keycode k = e.key.keysym.sym;
         if      (k == SDLK_q) running = false;
         else if (k == SDLK_p) paused = !paused;
-        else if (k == SDLK_PLUS || k == SDLK_EQUALS) { if (fps < 240) fps += 6; frame_ms = 1000 / fps; }
-        else if (k == SDLK_MINUS)                     { if (fps > 10)  fps -= 6; frame_ms = 1000 / fps; }
-        else if (k == SDLK_LEFTBRACKET)               { if (density > 0)   density -= 2; }
-        else if (k == SDLK_RIGHTBRACKET)              { if (density < 100) density += 2; }
+        else if (k == SDLK_PLUS || k == SDLK_EQUALS || k == SDLK_KP_PLUS) {
+          sim_hz += 6; if (sim_hz > MAX_SIM_HZ) sim_hz = MAX_SIM_HZ;
+          sim_dt = 1.0 / sim_hz;
+        }
+        else if (k == SDLK_MINUS || k == SDLK_KP_MINUS) {
+          sim_hz -= 6; if (sim_hz < MIN_SIM_HZ) sim_hz = MIN_SIM_HZ;
+          sim_dt = 1.0 / sim_hz;
+        }
+        else if (k == SDLK_LEFTBRACKET)  { if (density > 0)   density -= 2; }
+        else if (k == SDLK_RIGHTBRACKET) { if (density < 100) density += 2; }
         else if (k == SDLK_m) mono = !mono;
         else if (k == SDLK_F11) {
           fullscreen = !fullscreen;
           SDL_SetWindowFullscreen(win, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
-          int w, h; SDL_GL_GetDrawableSize(win, &w, &h);
-          compute_grid_from_window(w, h);
-          ensure_bloom_rts(w, h);
         }
         // Palette & cycling controls
         else if (k == SDLK_c) { g_cycle = !g_cycle; if (!g_cycle) g_hue = palette_base_hue(g_palette); }
         else if (k == SDLK_PERIOD) { if (g_cycle_speed < 360) g_cycle_speed += 10.0f; }
         else if (k == SDLK_COMMA)  { if (g_cycle_speed > 0)   g_cycle_speed -= 10.0f; }
-        else if (k == SDLK_n)      { g_palette = next_palette(g_palette); if (!g_cycle) g_hue = palette_base_hue(g_palette); }
-        else if (k == SDLK_b)      { g_palette = prev_palette(g_palette); if (!g_cycle) g_hue = palette_base_hue(g_palette); }
-        else if (k == SDLK_1)      { g_palette = PAL_BLUE;    if (!g_cycle) g_hue = palette_base_hue(g_palette); }
-        else if (k == SDLK_2)      { g_palette = PAL_GREEN;   if (!g_cycle) g_hue = palette_base_hue(g_palette); }
-        else if (k == SDLK_3)      { g_palette = PAL_PURPLE;  if (!g_cycle) g_hue = palette_base_hue(g_palette); }
-        else if (k == SDLK_4)      { g_palette = PAL_CYAN;    if (!g_cycle) g_hue = palette_base_hue(g_palette); }
-        else if (k == SDLK_5)      { g_palette = PAL_MAGENTA; if (!g_cycle) g_hue = palette_base_hue(g_palette); }
-        else if (k == SDLK_6)      { g_palette = PAL_RED;     if (!g_cycle) g_hue = palette_base_hue(g_palette); }
-        else if (k == SDLK_7)      { g_palette = PAL_MATRIX;  if (!g_cycle) g_hue = palette_base_hue(g_palette); }
+        else if (k == SDLK_n)      set_palette(next_palette(g_palette));
+        else if (k == SDLK_b)      set_palette(prev_palette(g_palette));
+        else if (k == SDLK_1)      set_palette(PAL_BLUE);
+        else if (k == SDLK_2)      set_palette(PAL_GREEN);
+        else if (k == SDLK_3)      set_palette(PAL_PURPLE);
+        else if (k == SDLK_4)      set_palette(PAL_CYAN);
+        else if (k == SDLK_5)      set_palette(PAL_MAGENTA);
+        else if (k == SDLK_6)      set_palette(PAL_RED);
+        else if (k == SDLK_7)      set_palette(PAL_MATRIX);
         // Bloom controls
         else if (k == SDLK_v)      { BLOOM_ON = !BLOOM_ON; }
         else if (k == SDLK_g)      { BLOOM_INTENSITY += 0.1f; if (BLOOM_INTENSITY > 3.0f) BLOOM_INTENSITY = 3.0f; }
@@ -830,28 +914,60 @@ int main(int argc, char **argv) {
       }
     }
 
-    // timing for hue cycle
-    Uint32 now_ms = SDL_GetTicks();
-    float  dt     = (now_ms - prev_ms) / 1000.0f; prev_ms = now_ms;
-    if (g_cycle) { g_hue += g_cycle_speed * dt; if (g_hue >= 360.0f) g_hue -= 360.0f; }
+    // Resize, fullscreen, DPI change, display move.
+    if (!update_layout(win, &last_dw, &last_dh)) {
+      fprintf(stderr, "Font atlas rebuild failed; exiting.\n");
+      goto cleanup;
+    }
 
-    if (!paused) { decay_cells(); step_streams(density); }
+    // Real elapsed time; clamp so a stall (suspend, drag) doesn't fast-forward.
+    double t  = now_s();
+    double dt = t - prev_t;
+    prev_t    = t;
+    if (dt > 0.25) dt = 0.25;
 
-    int w, h; SDL_GL_GetDrawableSize(win, &w, &h);
-    if (BLOOM_ON) draw_frame_with_bloom(w, h, mono); else draw_frame_no_bloom(w, h, mono);
+    if (g_cycle) {
+      g_hue += g_cycle_speed * (float)dt;
+      if (g_hue >= 360.0f) g_hue = fmodf(g_hue, 360.0f);
+    }
 
+    // Fixed-timestep simulation, independent of render rate.
+    if (paused) {
+      acc = 0.0;
+    } else {
+      acc += dt;
+      int steps = 0;
+      while (acc >= sim_dt && steps < MAX_CATCHUP) {
+        decay_cells();
+        step_streams(density);
+        acc -= sim_dt;
+        ++steps;
+      }
+      if (steps == MAX_CATCHUP) acc = 0.0;  // can't keep up; drop the backlog
+    }
+
+    if (BLOOM_ON) draw_frame_with_bloom(last_dw, last_dh, mono);
+    else          draw_frame_no_bloom(last_dw, last_dh, mono);
     SDL_GL_SwapWindow(win);
-    if (frame_ms > 0) SDL_Delay((Uint32)frame_ms);
+
+    // Frame limiter: with working vsync the swap already consumed the frame
+    // and this does nothing; without vsync it caps at the display refresh rate.
+    double remaining = display_period(win) - (now_s() - frame_start);
+    if (remaining > 0.002) SDL_Delay((Uint32)((remaining - 0.001) * 1000.0));
   }
 
-  free_grid();
-  if (atlas_tex) { glDeleteTextures(1, &atlas_tex); }
-  destroy_rt(&rtA);
-  destroy_rt(&rtB);
+  rc = 0;
 
-  SDL_GL_DeleteContext(ctx);
-  SDL_DestroyWindow(win);
+cleanup:
+  free_grid();
+  if (ctx) {
+    if (atlas_tex) glDeleteTextures(1, &atlas_tex);
+    destroy_rt(&rtA);
+    destroy_rt(&rtB);
+    SDL_GL_DeleteContext(ctx);
+  }
+  if (win) SDL_DestroyWindow(win);
   TTF_Quit();
   SDL_Quit();
-  return 0;
+  return rc;
 }

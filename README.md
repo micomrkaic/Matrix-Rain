@@ -77,7 +77,7 @@ run: $(BIN)
 ./matrix_rain_bloom
 ```
 
-**Blue palette, 60 FPS, medium density:**
+**Blue palette, 60 steps/s, medium density:**
 
 ```bash
 ./matrix_rain_bloom -f 60 -d 70 -s 18 -P 22 -C blue
@@ -108,12 +108,12 @@ run: $(BIN)
 
 | Option                      | Meaning                                                                                                       |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `-f <fps>`                  | Target FPS (default 60).                                                                                      |
+| `-f <steps/s>`              | Rain speed in simulation steps per second (6..240, default 60). Rendering follows the display refresh rate.   |
 | `-d <0..100>`               | Stream density percentage (default 65).                                                                       |
-| `-s <cell_px>`              | Cell size in pixels (default 18).                                                                             |
+| `-s <cell_pt>`              | Cell size in logical points (default 18); scaled automatically on HiDPI displays.                             |
 | `-m`                        | Monochrome mode.                                                                                              |
 | `-F <fontpath>`             | Path to TTF/OTF font for glyph atlas.                                                                         |
-| `-P <pt>`                   | Font point size for atlas (default 22).                                                                       |
+| `-P <pt>`                   | Font point size for atlas (default 22); scaled automatically on HiDPI displays.                               |
 | `-C <palette>`              | Color palette: `blue` (default), `green`, `purple`, `cyan`, `magenta`, `red`, `matrix`.                       |
 | `--cycle`                   | Enable hue cycling.                                                                                           |
 | `--cycle-speed <deg/s>`     | Hue change speed (default 30).                                                                                |
@@ -130,7 +130,7 @@ run: $(BIN)
 ```
 q             quit
 p             pause
-+ / -         FPS up / down
++ / -         rain speed up / down
 [ / ]         density down / up
 m             toggle monochrome
 F11           toggle fullscreen
@@ -221,9 +221,9 @@ Tip: enable `--cycle` to sweep the hue across the RGB spectrum in real time.
 
 ## ⚡ Performance Tips
 
-* Keep VSync on (`SDL_GL_SetSwapInterval(1)`) to avoid runaway FPS.
+* Rendering is paced by VSync; if the driver ignores VSync, a built-in limiter caps frames at the display refresh rate.
 * Lower `--bloom-scale` for wider glow at similar cost; adjust `--bloom-intensity` to taste.
-* `-s` controls grid density indirectly; smaller cells → more glyphs. Combine with `-f` carefully.
+* `-s` controls grid density indirectly; smaller cells → more glyphs. `-f` only changes rain speed, not render cost.
 * On integrated GPUs, prefer `--bloom-radius 3..4` and `--bloom-scale 0.5..0.7`.
 
 ---
