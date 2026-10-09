@@ -1,22 +1,44 @@
-CC      = gcc
-CFLAGS  = -std=c11 -O2 -Wall -Wextra $(shell sdl2-config --cflags)
-LDLIBS  = $(shell sdl2-config --libs) -lSDL2_ttf -lGL -lm
+CC       = cc
+SRC      = matrix_rain_bloom.c
+BIN      = matrix_rain_bloom
 
-SRC     = matrix_rain_bloom.c
-BIN     = matrix_rain_bloom
+UNAME_S := $(shell uname -s)
+
+# Prefer pkg-config (works on Linux and Homebrew); fall back to sdl2-config.
+SDL_CFLAGS := $(shell pkg-config --cflags sdl2 SDL2_ttf 2>/dev/null)
+SDL_LIBS   := $(shell pkg-config --libs   sdl2 SDL2_ttf 2>/dev/null)
+ifeq ($(strip $(SDL_LIBS)),)
+  SDL_CFLAGS := $(shell sdl2-config --cflags 2>/dev/null)
+  SDL_LIBS   := $(shell sdl2-config --libs 2>/dev/null) -lSDL2_ttf
+endif
+
+ifeq ($(UNAME_S),Darwin)
+  GL_LIBS = -framework OpenGL
+else
+  GL_LIBS = -lGL
+endif
+
+CFLAGS  += -std=c11 -O2 -Wall -Wextra $(SDL_CFLAGS)
+LDLIBS  += $(SDL_LIBS) $(GL_LIBS) -lm
 
 # Enable X11 desktop wallpaper mode with: make DESKTOP=1
 ifeq ($(DESKTOP),1)
-  CFLAGS  += -DENABLE_X11_DESKTOP
-  LDLIBS  += -lX11
+  CFLAGS += -DENABLE_X11_DESKTOP
+  LDLIBS += -lX11
 endif
 
 $(BIN): $(SRC)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
 
-.PHONY: clean run
+.PHONY: clean run check-deps
 clean:
 	rm -f $(BIN)
 
 run: $(BIN)
 	./$(BIN) -f 60 -d 70 -s 18 -P 22 -C blue
+
+# Quick sanity check for build dependencies
+check-deps:
+	@pkg-config --exists sdl2     || echo "missing: SDL2 dev (apt: libsdl2-dev | brew: sdl2)"
+	@pkg-config --exists SDL2_ttf || echo "missing: SDL2_ttf dev (apt: libsdl2-ttf-dev | brew: sdl2_ttf)"
+	@echo "check-deps done"
