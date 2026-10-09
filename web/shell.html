@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Matrix Rain</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; outline: none; position: fixed; left: 0; top: 0; }
+  #viewport { position: fixed; inset: 0; pointer-events: none; }
+  #hint, #status {
+    position: fixed; left: 16px; bottom: 14px;
+    font: 13px/1.4 ui-monospace, Menlo, "DejaVu Sans Mono", monospace;
+    color: #8f8; opacity: 0.85; pointer-events: none;
+    transition: opacity 1.5s ease;
+  }
+  #status { bottom: auto; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; }
+  #hint.hidden { opacity: 0; }
+</style>
+</head>
+<body>
+<div id="viewport"></div>
+<canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+<div id="status">loading…</div>
+<div id="hint" class="hidden">h: help &nbsp;·&nbsp; Enter or double-click: fullscreen</div>
+<script>
+  // URL query → program arguments: ?C=matrix&layers=3&M=WAKE+UP+NEO&no-bloom
+  // One-letter keys become -X, longer ones --name; empty values are flags.
+  var args = [];
+  new URLSearchParams(location.search).forEach(function (v, k) {
+    args.push(k.length === 1 ? '-' + k : '--' + k);
+    if (v !== '') args.push(v);
+  });
+
+  var statusEl = document.getElementById('status');
+  var hintEl   = document.getElementById('hint');
+  var canvas   = document.getElementById('canvas');
+
+  if (!document.createElement('canvas').getContext('webgl2')) {
+    statusEl.textContent = 'This page needs WebGL2, which your browser does not provide.';
+  }
+
+  function toggleFullscreen() {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen();
+  }
+  canvas.addEventListener('dblclick', toggleFullscreen);
+  window.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { toggleFullscreen(); e.preventDefault(); }
+  });
+
+  var Module = {
+    arguments: args,
+    canvas: canvas,
+    print: function (t) { console.log(t); },
+    printErr: function (t) { console.warn(t); },
+    setStatus: function (t) {
+      if (t) { statusEl.textContent = t; return; }
+      statusEl.style.display = 'none';
+      hintEl.classList.remove('hidden');
+      setTimeout(function () { hintEl.classList.add('hidden'); }, 5000);
+      canvas.focus();
+    },
+    onAbort: function (what) { statusEl.style.display = ''; statusEl.textContent = 'Error: ' + what; }
+  };
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

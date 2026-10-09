@@ -37,6 +37,8 @@
 // Build
 //   Linux:  sudo apt install libsdl2-dev libsdl2-ttf-dev; make   (make DESKTOP=1)
 //   macOS:  brew install sdl2 sdl2_ttf; make
+//   Web:    emmake make web   → dist/ (WebGL2; options come from the URL query,
+//           e.g. index.html?C=matrix&layers=3&M=WAKE+UP+NEO)
 //
 // Timing
 //   -f sets the rain speed in simulation steps per second (default 60).
@@ -62,7 +64,11 @@
 #include <SDL.h>
 #include <SDL_ttf.h>
 
-#ifdef __APPLE__
+#if defined(__EMSCRIPTEN__)
+  #include <emscripten.h>
+  #include <emscripten/html5.h>
+  #include <GLES3/gl3.h>
+#elif defined(__APPLE__)
   #define GL_SILENCE_DEPRECATION 1
   #include <OpenGL/gl3.h>
 #else
@@ -605,7 +611,7 @@ static TTF_Font *open_kana_font(int pt) {
               g_kana_font_path);
   }
 
-#if !defined(__APPLE__) && !defined(_WIN32)
+#if !defined(__APPLE__) && !defined(_WIN32) && !defined(__EMSCRIPTEN__)
   // Ask fontconfig, if it's installed.
   FILE *fp = popen("fc-match -f '%{file}' ':charset=ff71' 2>/dev/null", "r");
   if (fp) {
@@ -628,6 +634,9 @@ static int load_font_build_atlas(const char *font_path, int pt_size) {
   if (!font) {
     if (font_path) fprintf(stderr, "Could not open font %s; trying defaults.\n", font_path);
     const char *cands[] = {
+#ifdef __EMSCRIPTEN__
+      "/fonts/NotoSansMonoCJKjp-Matrix.otf",   // bundled: ASCII + katakana
+#endif
       "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
       "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
       "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
@@ -1361,6 +1370,14 @@ static void ui_rect(float x0, float y0, float x1, float y1, bool textured,
   glBindVertexArray(0);
 }
 
+#ifdef __EMSCRIPTEN__
+#define QUIT_LINE       "                              "
+#define FULLSCREEN_LINE "Enter  fullscreen (dbl-click) "
+#else
+#define QUIT_LINE       "q      quit                   "
+#define FULLSCREEN_LINE "F11    fullscreen             "
+#endif
+
 static void build_help_text(char *out, size_t n, const HelpState *st) {
   char msg[48];
   if (g_msg) {
@@ -1389,9 +1406,9 @@ static void build_help_text(char *out, size_t n, const HelpState *st) {
   snprintf(out, n,
     "MATRIX RAIN                                  h / Esc: close\n"
     "\n"
-    "q      quit                    p      pause        %s\n"
+    "%s p      pause        %s\n"
     "+ -    rain speed  %-12s[ ]    density      %s\n"
-    "F11    fullscreen              m      mono         %s\n"
+    "%s m      mono         %s\n"
     "\n"
     "n b    palette     %-12s1..7   quick palettes\n"
     "c      hue cycle   %-12s, .    cycle speed  %s\n"
@@ -1401,9 +1418,9 @@ static void build_help_text(char *out, size_t n, const HelpState *st) {
     "\n"
     "l      layers      %-12sk      glyphs       %s\n"
     "x      message     %s",
-    pause_,
+    QUIT_LINE, pause_,
     speed, dens,
-    mono_,
+    FULLSCREEN_LINE, mono_,
     pal,
     cycon, cyc,
     bloom, inten,
@@ -1631,6 +1648,7 @@ static bool update_layout(SDL_Window *win, int *last_dw, int *last_dh) {
   return true;
 }
 
+#ifndef __EMSCRIPTEN__
 // Seconds per refresh of the display the window is on (fallback 60 Hz).
 static double display_period(SDL_Window *win) {
   SDL_DisplayMode m;
@@ -1639,6 +1657,7 @@ static double display_period(SDL_Window *win) {
     return 1.0 / (double)m.refresh_rate;
   return 1.0 / 60.0;
 }
+#endif
 
 static inline double now_s(void) {
   return (double)SDL_GetPerformanceCounter() /
@@ -1656,22 +1675,187 @@ static bool parse_glyph_mode(const char *s, GlyphMode *out) {
   return false;
 }
 
+// ===== Application state & main loop =====
+typedef struct {
+  SDL_Window   *win;
+  SDL_GLContext ctx;
+  int           sim_hz, density;
+  bool          mono, paused, fullscreen, running;
+  double        sim_dt, prev_t;
+  int           last_dw, last_dh;
+} App;
+
+static App app = {
+  .sim_hz = DEFAULT_SIM_HZ, .density = DEFAULT_DENSITY, .running = true,
+};
+
+static void handle_key(const SDL_KeyboardEvent *ke) {
+  SDL_Keycode k = ke->keysym.sym;
+  if (k == SDLK_h || k == SDLK_F1 || k == SDLK_QUESTION ||
+      (k == SDLK_SLASH && (ke->keysym.mod & KMOD_SHIFT))) { g_help = !g_help; return; }
+  if (k == SDLK_ESCAPE) { g_help = false; return; }
+#ifndef __EMSCRIPTEN__
+  if (k == SDLK_q) { app.running = false; return; }
+  if (k == SDLK_F11) {
+    app.fullscreen = !app.fullscreen;
+    SDL_SetWindowFullscreen(app.win, app.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+    return;
+  }
+#endif
+  switch (k) {
+    case SDLK_p: app.paused = !app.paused; break;
+    case SDLK_PLUS: case SDLK_EQUALS: case SDLK_KP_PLUS:
+      app.sim_hz += 6; if (app.sim_hz > MAX_SIM_HZ) app.sim_hz = MAX_SIM_HZ;
+      app.sim_dt = 1.0 / app.sim_hz;
+      break;
+    case SDLK_MINUS: case SDLK_KP_MINUS:
+      app.sim_hz -= 6; if (app.sim_hz < MIN_SIM_HZ) app.sim_hz = MIN_SIM_HZ;
+      app.sim_dt = 1.0 / app.sim_hz;
+      break;
+    case SDLK_LEFTBRACKET:  if (app.density > 0)   app.density -= 2; break;
+    case SDLK_RIGHTBRACKET: if (app.density < 100) app.density += 2; break;
+    case SDLK_m: app.mono = !app.mono; break;
+    // Palette & cycling
+    case SDLK_c: g_cycle = !g_cycle; if (!g_cycle) g_hue = palette_base_hue(g_palette); break;
+    case SDLK_PERIOD: if (g_cycle_speed < 360) g_cycle_speed += 10.0f; break;
+    case SDLK_COMMA:  if (g_cycle_speed > 0)   g_cycle_speed -= 10.0f; break;
+    case SDLK_n: set_palette(next_palette(g_palette)); break;
+    case SDLK_b: set_palette(prev_palette(g_palette)); break;
+    case SDLK_1: set_palette(PAL_BLUE);    break;
+    case SDLK_2: set_palette(PAL_GREEN);   break;
+    case SDLK_3: set_palette(PAL_PURPLE);  break;
+    case SDLK_4: set_palette(PAL_CYAN);    break;
+    case SDLK_5: set_palette(PAL_MAGENTA); break;
+    case SDLK_6: set_palette(PAL_RED);     break;
+    case SDLK_7: set_palette(PAL_MATRIX);  break;
+    // Bloom
+    case SDLK_v: BLOOM_ON = !BLOOM_ON; break;
+    case SDLK_g: BLOOM_INTENSITY += 0.1f; if (BLOOM_INTENSITY > 3.0f) BLOOM_INTENSITY = 3.0f; break;
+    case SDLK_f: BLOOM_INTENSITY -= 0.1f; if (BLOOM_INTENSITY < 0.0f) BLOOM_INTENSITY = 0.0f; break;
+    case SDLK_r: BLOOM_RADIUS += 1; if (BLOOM_RADIUS > 5) BLOOM_RADIUS = 5; break;
+    case SDLK_e: BLOOM_RADIUS -= 1; if (BLOOM_RADIUS < 1) BLOOM_RADIUS = 1; break;
+    case SDLK_y: BLOOM_THRESHOLD += 0.05f; if (BLOOM_THRESHOLD > 0.95f) BLOOM_THRESHOLD = 0.95f; break;
+    case SDLK_t: BLOOM_THRESHOLD -= 0.05f; if (BLOOM_THRESHOLD < 0.0f)  BLOOM_THRESHOLD = 0.0f;  break;
+    // Look
+    case SDLK_l: g_layers = g_layers % MAX_LAYERS + 1; break;
+    case SDLK_k: if (have_kana) g_glyph_mode = (GlyphMode)((g_glyph_mode + 1) % GM_COUNT); break;
+    case SDLK_x: msg_start(); break;
+    default: break;
+  }
+}
+
+#ifdef __EMSCRIPTEN__
+// Size of the browser viewport, read from a fixed full-page element in the
+// shell page (#viewport), in CSS pixels.
+static void web_viewport(int *vw, int *vh) {
+  double w = 0.0, h = 0.0;
+  if (emscripten_get_element_css_size("#viewport", &w, &h) != EMSCRIPTEN_RESULT_SUCCESS) w = h = 0.0;
+  *vw = (int)w; *vh = (int)h;
+}
+
+// Keep the SDL window (and so the canvas) the size of the browser viewport.
+static void web_sync_size(void) {
+  int vw, vh;
+  web_viewport(&vw, &vh);
+  int w, h;
+  SDL_GetWindowSize(app.win, &w, &h);
+  if (vw > 0 && vh > 0 && (vw != w || vh != h)) SDL_SetWindowSize(app.win, vw, vh);
+}
+#endif
+
+// One iteration of the main loop. Returns false to stop.
+static bool frame(void) {
+  SDL_Event e;
+  while (SDL_PollEvent(&e)) {
+    if (e.type == SDL_QUIT) app.running = false;
+    else if (e.type == SDL_KEYDOWN) handle_key(&e.key);
+  }
+  if (!app.running) return false;
+
+#ifdef __EMSCRIPTEN__
+  web_sync_size();
+#endif
+  // Resize, fullscreen, DPI change, display move.
+  if (!update_layout(app.win, &app.last_dw, &app.last_dh)) return false;
+
+  // Real elapsed time; clamp so a stall (suspend, hidden tab) doesn't fast-forward.
+  double t  = now_s();
+  double dt = t - app.prev_t;
+  app.prev_t = t;
+  if (dt > 0.25) dt = 0.25;
+
+  if (g_cycle) {
+    g_hue += g_cycle_speed * (float)dt;
+    if (g_hue >= 360.0f) g_hue = fmodf(g_hue, 360.0f);
+  }
+
+  if (!app.paused) {
+    // Fades run on real time every frame; heads advance on fixed sim steps.
+    // Each layer runs at its own speed.
+    for (int li = 0; li < g_layers; ++li) {
+      Layer *L = &layers[li];
+      double step_dt = app.sim_dt / L->speed;   // real seconds per layer step
+      fade_layer(L, dt, step_dt);
+      L->acc += dt;
+      int steps = 0;
+      while (L->acc >= step_dt && steps < MAX_CATCHUP) {
+        step_layer(L, app.density, step_dt);
+        L->acc -= step_dt;
+        ++steps;
+      }
+      if (steps == MAX_CATCHUP) L->acc = 0.0;  // can't keep up; drop backlog
+    }
+    msg_update(dt);
+  }
+
+  draw_frame(app.last_dw, app.last_dh, app.mono);
+  if (g_help) {
+    HelpState hs = { app.sim_hz, app.density, app.mono, app.paused };
+    draw_help(app.last_dw, app.last_dh, &hs);
+  }
+  SDL_GL_SwapWindow(app.win);
+  return true;
+}
+
+#ifdef __EMSCRIPTEN__
+static void web_frame(void) {
+  if (!frame()) emscripten_cancel_main_loop();
+}
+#endif
+
+static void shutdown_app(void) {
+  free_layers();
+  free(msg_cells);
+  free(kana_found_path);
+  free(used_font_path);
+  if (app.ctx) {
+    if (atlas_tex) glDeleteTextures(1, &atlas_tex);
+    destroy_rt(&rtA);
+    destroy_rt(&rtB);
+    destroy_gpu();
+    destroy_ui();
+    SDL_GL_DeleteContext(app.ctx);
+  }
+  if (app.win) SDL_DestroyWindow(app.win);
+  TTF_Quit();
+  SDL_Quit();
+}
+
 int main(int argc, char **argv) {
-  int  sim_hz = DEFAULT_SIM_HZ, density = DEFAULT_DENSITY;
-  bool mono = false, want_desktop = false;
+  bool want_desktop = false;
 
   for (int i = 1; i < argc; ++i) {
-    if      (strcmp(argv[i], "-f") == 0 && i + 1 < argc) sim_hz = atoi(argv[++i]);
+    if      (strcmp(argv[i], "-f") == 0 && i + 1 < argc) app.sim_hz = atoi(argv[++i]);
     else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
-      density = atoi(argv[++i]);
-      density = density < 0 ? 0 : (density > 100 ? 100 : density);
+      app.density = atoi(argv[++i]);
+      app.density = app.density < 0 ? 0 : (app.density > 100 ? 100 : app.density);
     }
     else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
       cell_pt = atoi(argv[++i]);
       if (cell_pt < 8)  cell_pt = 8;
       if (cell_pt > 64) cell_pt = 64;
     }
-    else if (strcmp(argv[i], "-m") == 0) mono = true;
+    else if (strcmp(argv[i], "-m") == 0) app.mono = true;
     else if (strcmp(argv[i], "-F") == 0 && i + 1 < argc) g_font_path = argv[++i];
     else if (strcmp(argv[i], "-P") == 0 && i + 1 < argc) {
       g_font_pt = atoi(argv[++i]);
@@ -1679,10 +1863,8 @@ int main(int argc, char **argv) {
       if (g_font_pt > 128) g_font_pt = 128;
     }
     else if (strcmp(argv[i], "-G") == 0 && i + 1 < argc) {
-      if (!parse_glyph_mode(argv[++i], &g_glyph_mode)) {
-        fprintf(stderr, "Unknown glyph set '%s' (use mix, kana or ascii)\n", argv[i]);
-        return 2;
-      }
+      if (!parse_glyph_mode(argv[++i], &g_glyph_mode))
+        fprintf(stderr, "Unknown glyph set '%s' (use mix, kana or ascii); using mix\n", argv[i]);
     }
     else if (strcmp(argv[i], "--kana-font") == 0 && i + 1 < argc) g_kana_font_path = argv[++i];
     else if (strcmp(argv[i], "--no-mirror") == 0) g_mirror = false;
@@ -1738,8 +1920,8 @@ int main(int argc, char **argv) {
       return 0;
     }
   }
-  if (sim_hz < MIN_SIM_HZ) sim_hz = MIN_SIM_HZ;
-  if (sim_hz > MAX_SIM_HZ) sim_hz = MAX_SIM_HZ;
+  if (app.sim_hz < MIN_SIM_HZ) app.sim_hz = MIN_SIM_HZ;
+  if (app.sim_hz > MAX_SIM_HZ) app.sim_hz = MAX_SIM_HZ;
 
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_TIMER) != 0) {
     fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
@@ -1754,53 +1936,69 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+#ifdef __EMSCRIPTEN__
+  // WebGL2 = OpenGL ES 3.0
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+  int win_w, win_h;
+  web_viewport(&win_w, &win_h);
+  if (win_w <= 0 || win_h <= 0) { win_w = 1280; win_h = 720; }
+#else
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
 #ifdef __APPLE__
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
 #endif
+  int win_w = 1280, win_h = 720;
+#endif
   SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
   SDL_GL_SetAttribute(SDL_GL_RED_SIZE,   8);
   SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
   SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE,  8);
 
-  int           rc  = 1;
-  SDL_Window   *win = NULL;
-  SDL_GLContext ctx = NULL;
-
-  win = SDL_CreateWindow(
+  app.win = SDL_CreateWindow(
       "Matrix Rain (Bloom)",
       SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-      1280, 720,
+      win_w, win_h,
       SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-  if (!win) {
+  if (!app.win) {
     fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
-    goto cleanup;
+    shutdown_app();
+    return 1;
   }
 
-  ctx = SDL_GL_CreateContext(win);
-  if (!ctx) {
+  app.ctx = SDL_GL_CreateContext(app.win);
+  if (!app.ctx) {
+#ifdef __EMSCRIPTEN__
+    fprintf(stderr, "SDL_GL_CreateContext: %s\nThis page needs WebGL2.\n", SDL_GetError());
+#else
     fprintf(stderr, "SDL_GL_CreateContext: %s\n"
                     "This program needs OpenGL 3.3 (core profile).\n",
             SDL_GetError());
-    goto cleanup;
+#endif
+    shutdown_app();
+    return 1;
   }
 
+#ifndef __EMSCRIPTEN__
   // Prefer adaptive vsync, fall back to regular vsync. Either way the frame
-  // limiter below caps rendering at the refresh rate if vsync is ignored.
+  // limiter in the loop caps rendering at the refresh rate if vsync is ignored.
   if (SDL_GL_SetSwapInterval(-1) != 0) SDL_GL_SetSwapInterval(1);
+#endif
 
   if (!init_gpu()) {
     fprintf(stderr, "GPU setup failed; exiting.\n");
-    goto cleanup;
+    shutdown_app();
+    return 1;
   }
   if (!init_ui()) fprintf(stderr, "Help overlay unavailable.\n");
 
 #if defined(ENABLE_X11_DESKTOP) && \
     (defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
      defined(__NetBSD__))
-  if (want_desktop) { make_desktop_window(win); SDL_SetWindowBordered(win, SDL_FALSE); }
+  if (want_desktop) { make_desktop_window(app.win); SDL_SetWindowBordered(app.win, SDL_FALSE); }
 #else
   if (want_desktop) {
     fprintf(stderr,
@@ -1809,136 +2007,30 @@ int main(int argc, char **argv) {
   }
 #endif
 
-  int last_dw = 0, last_dh = 0;
-  if (!update_layout(win, &last_dw, &last_dh)) goto cleanup;
+  if (!update_layout(app.win, &app.last_dw, &app.last_dh)) {
+    shutdown_app();
+    return 1;
+  }
   if (g_glyph_mode != GM_ASCII && !have_kana) g_glyph_mode = GM_ASCII;
 
-  bool   running = true, paused = false, fullscreen = false;
-  double sim_dt  = 1.0 / sim_hz;
-  double prev_t  = now_s();
+  app.sim_dt = 1.0 / app.sim_hz;
+  app.prev_t = now_s();
 
-  while (running) {
+#ifdef __EMSCRIPTEN__
+  // The browser drives the loop (requestAnimationFrame); main() never returns.
+  emscripten_set_main_loop(web_frame, 0, 1);
+  return 0;
+#else
+  for (;;) {
     double frame_start = now_s();
-
-    SDL_Event e;
-    while (SDL_PollEvent(&e)) {
-      if (e.type == SDL_QUIT) {
-        running = false;
-      } else if (e.type == SDL_KEYDOWN) {
-        SDL_Keycode k = e.key.keysym.sym;
-        if      (k == SDLK_q) running = false;
-        else if (k == SDLK_h || k == SDLK_F1 || k == SDLK_QUESTION ||
-                 (k == SDLK_SLASH && (e.key.keysym.mod & KMOD_SHIFT))) g_help = !g_help;
-        else if (k == SDLK_ESCAPE) g_help = false;
-        else if (k == SDLK_p) paused = !paused;
-        else if (k == SDLK_PLUS || k == SDLK_EQUALS || k == SDLK_KP_PLUS) {
-          sim_hz += 6; if (sim_hz > MAX_SIM_HZ) sim_hz = MAX_SIM_HZ;
-          sim_dt = 1.0 / sim_hz;
-        }
-        else if (k == SDLK_MINUS || k == SDLK_KP_MINUS) {
-          sim_hz -= 6; if (sim_hz < MIN_SIM_HZ) sim_hz = MIN_SIM_HZ;
-          sim_dt = 1.0 / sim_hz;
-        }
-        else if (k == SDLK_LEFTBRACKET)  { if (density > 0)   density -= 2; }
-        else if (k == SDLK_RIGHTBRACKET) { if (density < 100) density += 2; }
-        else if (k == SDLK_m) mono = !mono;
-        else if (k == SDLK_F11) {
-          fullscreen = !fullscreen;
-          SDL_SetWindowFullscreen(win, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
-        }
-        // Palette & cycling controls
-        else if (k == SDLK_c) { g_cycle = !g_cycle; if (!g_cycle) g_hue = palette_base_hue(g_palette); }
-        else if (k == SDLK_PERIOD) { if (g_cycle_speed < 360) g_cycle_speed += 10.0f; }
-        else if (k == SDLK_COMMA)  { if (g_cycle_speed > 0)   g_cycle_speed -= 10.0f; }
-        else if (k == SDLK_n)      set_palette(next_palette(g_palette));
-        else if (k == SDLK_b)      set_palette(prev_palette(g_palette));
-        else if (k == SDLK_1)      set_palette(PAL_BLUE);
-        else if (k == SDLK_2)      set_palette(PAL_GREEN);
-        else if (k == SDLK_3)      set_palette(PAL_PURPLE);
-        else if (k == SDLK_4)      set_palette(PAL_CYAN);
-        else if (k == SDLK_5)      set_palette(PAL_MAGENTA);
-        else if (k == SDLK_6)      set_palette(PAL_RED);
-        else if (k == SDLK_7)      set_palette(PAL_MATRIX);
-        // Bloom controls
-        else if (k == SDLK_v)      { BLOOM_ON = !BLOOM_ON; }
-        else if (k == SDLK_g)      { BLOOM_INTENSITY += 0.1f; if (BLOOM_INTENSITY > 3.0f) BLOOM_INTENSITY = 3.0f; }
-        else if (k == SDLK_f)      { BLOOM_INTENSITY -= 0.1f; if (BLOOM_INTENSITY < 0.0f) BLOOM_INTENSITY = 0.0f; }
-        else if (k == SDLK_r)      { BLOOM_RADIUS += 1; if (BLOOM_RADIUS > 5) BLOOM_RADIUS = 5; }
-        else if (k == SDLK_e)      { BLOOM_RADIUS -= 1; if (BLOOM_RADIUS < 1) BLOOM_RADIUS = 1; }
-        else if (k == SDLK_y)      { BLOOM_THRESHOLD += 0.05f; if (BLOOM_THRESHOLD > 0.95f) BLOOM_THRESHOLD = 0.95f; }
-        else if (k == SDLK_t)      { BLOOM_THRESHOLD -= 0.05f; if (BLOOM_THRESHOLD < 0.0f)  BLOOM_THRESHOLD = 0.0f; }
-        // Look
-        else if (k == SDLK_l)      { g_layers = g_layers % MAX_LAYERS + 1; }
-        else if (k == SDLK_k)      {
-          if (have_kana) g_glyph_mode = (GlyphMode)((g_glyph_mode + 1) % GM_COUNT);
-        }
-        else if (k == SDLK_x)      { msg_start(); }
-      }
-    }
-
-    // Resize, fullscreen, DPI change, display move.
-    if (!update_layout(win, &last_dw, &last_dh)) goto cleanup;
-
-    // Real elapsed time; clamp so a stall (suspend, drag) doesn't fast-forward.
-    double t  = now_s();
-    double dt = t - prev_t;
-    prev_t    = t;
-    if (dt > 0.25) dt = 0.25;
-
-    if (g_cycle) {
-      g_hue += g_cycle_speed * (float)dt;
-      if (g_hue >= 360.0f) g_hue = fmodf(g_hue, 360.0f);
-    }
-
-    if (!paused) {
-      // Fades run on real time every frame; heads advance on fixed sim steps.
-      // Each layer runs at its own speed.
-      for (int li = 0; li < g_layers; ++li) {
-        Layer *L = &layers[li];
-        double step_dt = sim_dt / L->speed;   // real seconds per layer step
-        fade_layer(L, dt, step_dt);
-        L->acc += dt;
-        int steps = 0;
-        while (L->acc >= step_dt && steps < MAX_CATCHUP) {
-          step_layer(L, density, step_dt);
-          L->acc -= step_dt;
-          ++steps;
-        }
-        if (steps == MAX_CATCHUP) L->acc = 0.0;  // can't keep up; drop backlog
-      }
-      msg_update(dt);
-    }
-
-    draw_frame(last_dw, last_dh, mono);
-    if (g_help) {
-      HelpState hs = { sim_hz, density, mono, paused };
-      draw_help(last_dw, last_dh, &hs);
-    }
-    SDL_GL_SwapWindow(win);
-
+    if (!frame()) break;
     // Frame limiter: with working vsync the swap already consumed the frame
     // and this does nothing; without vsync it caps at the display refresh rate.
-    double remaining = display_period(win) - (now_s() - frame_start);
+    double remaining = display_period(app.win) - (now_s() - frame_start);
     if (remaining > 0.002) SDL_Delay((Uint32)((remaining - 0.001) * 1000.0));
   }
-
-  rc = 0;
-
-cleanup:
-  free_layers();
-  free(msg_cells);
-  free(kana_found_path);
-  free(used_font_path);
-  if (ctx) {
-    if (atlas_tex) glDeleteTextures(1, &atlas_tex);
-    destroy_rt(&rtA);
-    destroy_rt(&rtB);
-    destroy_gpu();
-    destroy_ui();
-    SDL_GL_DeleteContext(ctx);
-  }
-  if (win) SDL_DestroyWindow(win);
-  TTF_Quit();
-  SDL_Quit();
+  int rc = app.running ? 1 : 0;   // still "running" means a fatal error
+  shutdown_app();
   return rc;
+#endif
 }

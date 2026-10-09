@@ -30,9 +30,30 @@ endif
 $(BIN): $(SRC)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
 
-.PHONY: clean run check-deps
+# ---- Web build (Emscripten → WebGL2) ----
+# Needs emcc on PATH (source emsdk_env.sh). Output goes to dist/, ready for
+# GitHub Pages or any static web server: make web && (cd dist && python3 -m http.server)
+EMCC     ?= emcc
+WEB_DIR   = web
+WEB_OUT   = dist
+WEB_FLAGS = -std=c11 -O2 -Wall -Wextra \
+            -sUSE_SDL=2 -sUSE_SDL_TTF=2 \
+            -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2 \
+            -sALLOW_MEMORY_GROWTH=1 -sENVIRONMENT=web \
+            --shell-file $(WEB_DIR)/shell.html \
+            --preload-file $(WEB_DIR)/fonts@/fonts
+
+web: $(WEB_OUT)/index.html
+
+$(WEB_OUT)/index.html: $(SRC) $(WEB_DIR)/shell.html $(wildcard $(WEB_DIR)/fonts/*)
+	mkdir -p $(WEB_OUT)
+	$(EMCC) $(WEB_FLAGS) $(SRC) -o $@
+	cp $(WEB_DIR)/fonts/OFL.txt $(WEB_OUT)/FONT-LICENSE.txt
+
+.PHONY: clean run check-deps web
 clean:
 	rm -f $(BIN)
+	rm -rf $(WEB_OUT)
 
 run: $(BIN)
 	./$(BIN) -f 60 -d 70 -s 18 -P 22 -C blue

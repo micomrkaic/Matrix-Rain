@@ -43,6 +43,32 @@ make
 
 The makefile uses `pkg-config` (falling back to `sdl2-config`) and links `-framework OpenGL` on macOS, `-lGL` elsewhere.
 
+### Web (WebAssembly, runs in the browser)
+
+Live at **https://micomrkaic.github.io/Matrix-Rain/** — rebuilt by GitHub Actions on every push to `main` (`.github/workflows/pages.yml`).
+
+Options go in the URL query: one‑letter keys become `-X`, longer ones `--name`, empty values are flags. Examples:
+
+```
+https://micomrkaic.github.io/Matrix-Rain/?C=matrix&layers=3
+https://micomrkaic.github.io/Matrix-Rain/?C=green&M=WAKE+UP+NEO&message-every=20
+https://micomrkaic.github.io/Matrix-Rain/?G=ascii&layers=1&mutate=0&no-bloom
+```
+
+In the browser: `h` help, `Enter` or double‑click fullscreen (`q` and `F11` are desktop‑only). Needs WebGL2 (all current browsers).
+
+Building it yourself needs [Emscripten](https://emscripten.org/docs/getting_started/downloads.html):
+
+```bash
+git clone https://github.com/emscripten-core/emsdk.git ~/emsdk
+~/emsdk/emsdk install 3.1.52 && ~/emsdk/emsdk activate 3.1.52
+source ~/emsdk/emsdk_env.sh
+make web                                  # → dist/
+python3 -m http.server -d dist 8000       # open http://localhost:8000
+```
+
+The web build bundles one font, `web/fonts/NotoSansMonoCJKjp-Matrix.otf` — Noto Sans Mono CJK JP subset to ASCII + half‑width katakana (13 KB, SIL OFL 1.1, see `web/fonts/OFL.txt`).
+
 ---
 
 ## ▶️ Running
